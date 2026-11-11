@@ -17,7 +17,29 @@ def patches():
             ('    keyless = keyless_caller(current_account())', '    from forged_unsloth.guard import visible_server as _forged_visible_server\n    servers = [server for server in servers if _forged_visible_server(server)]\n    keyless = keyless_caller(current_account())'),
             ('        server_id = server["id"]\n        display = server.get("display_name") or server_id', '        from forged_unsloth.guard import visible_server as _forged_visible_server\n        if not _forged_visible_server(server):\n            return "Forged Unsloth Podman tools are available only in the owner GUI."\n        server_id = server["id"]\n        display = server.get("display_name") or server_id'),
         ],
-        "frontend/src/main.tsx": [("import \"./index.css\";", "import \"./index.css\";\nimport \"./forged-unsloth/forged\";")],
+        "frontend/src/main.tsx": [
+            ('import "./index.css";', 'import "./index.css";\nimport "./forged-unsloth/forged";\nimport { waitForStartup } from "./forged-unsloth/browser-reliability";'),
+            ('  Promise.all([\n    localeInitialization,\n    interfaceScaleInitialization,\n    chatPageAtStart,\n  ]).then(renderApp);', '  void waitForStartup([\n    localeInitialization,\n    interfaceScaleInitialization,\n    chatPageAtStart,\n  ]).then(renderApp);'),
+        ],
+        "frontend/src/features/browser/native-view.ts": [
+            ('let listening = false;\n\nfunction listenOnce(): void {\n  if (listening) return;\n  listening = true;\n  void import("@tauri-apps/api/event").then(({ listen }) =>\n    listen<NativeEvent>(EVENT, (event) => onNativeEvent(event.payload)),\n  );\n}', 'import { retryableOnce } from "@/forged-unsloth/browser-reliability";\n\nconst listenOnce = retryableOnce(async () => {\n  const { listen } = await import("@tauri-apps/api/event");\n  await listen<NativeEvent>(EVENT, (event) => onNativeEvent(event.payload));\n});'),
+            ('  listenOnce();\n  if (!watchingBackground)', '  void listenOnce().catch(() => undefined);\n  if (!watchingBackground)'),
+            ('export function startNativeViews(): () => void {\n  listenOnce();', 'export function startNativeViews(): () => void {\n  void listenOnce().catch(() => undefined);'),
+            ('  const resumed = resume.get(tabId);\n  try {\n    if (views.has(tabId)) {', '  const resumed = resume.get(tabId);\n  const openingGeneration = generation;\n  try {\n    await listenOnce();\n    if (openingGeneration !== generation) return;\n    if (views.has(tabId)) {'),
+            ('  try {\n    openedTabs.add(tabId);', '  try {\n    await listenOnce();\n    if (stale()) return;\n    openedTabs.add(tabId);'),
+        ],
+        "frontend/src/features/browser/agent/executor.ts": [
+            ('  if (!chatOnScreen(context)) store.updateTab(tabId, { loading: true });', '  if (!chatOnScreen(context) || useNativeBrowser.getState().enabled) store.updateTab(tabId, { loading: true });'),
+        ],
+        "frontend/src/features/browser/api.ts": [
+            ('export class BrowserFetchError extends Error {', 'import { retryBrowserRead } from "@/forged-unsloth/browser-reliability";\n\nexport class BrowserFetchError extends Error {'),
+            ('  constructor(message: string, botCheck: boolean) {\n    super(message);\n    this.botCheck = botCheck;\n  }', '  readonly status: number;\n  constructor(message: string, botCheck: boolean, status = 0) {\n    super(message);\n    this.botCheck = botCheck;\n    this.status = status;\n  }'),
+            ('export async function fetchBrowserPage(request: BrowserRequest, signal: AbortSignal): Promise<BrowserPage> {', 'export async function fetchBrowserPage(request: BrowserRequest, signal: AbortSignal): Promise<BrowserPage> {\n  return retryBrowserRead(() => fetchBrowserPageOnce(request, signal), signal, request.method !== "POST");\n}\n\nasync function fetchBrowserPageOnce(request: BrowserRequest, signal: AbortSignal): Promise<BrowserPage> {'),
+            ('throw new BrowserFetchError(message.replace(/^Failed to fetch URL:\\s*/, ""), botCheck);', 'throw new BrowserFetchError(message.replace(/^Failed to fetch URL:\\s*/, ""), botCheck, response.status);'),
+        ],
+        "frontend/src/features/browser/tab-view.tsx": [
+            ('      .then((page) => {\n        cachePage(entry, page);', '      .then((page) => {\n        if (controller.signal.aborted) return;\n        cachePage(entry, page);'),
+        ],
         "frontend/src/features/settings/tabs/remote-lan-tab.tsx": [("export function RemoteLanTab() {", "export { ForgedRemote as RemoteLanTab } from \"@/forged-unsloth/forged\";\n\nexport function LegacyRemoteLanTab() {")],
         "frontend/src/features/settings/stores/appearance-custom-store.ts": [
             ('  tasks: false,', '  tasks: true,'),

@@ -44,6 +44,7 @@ The process downloads npm, Cargo, and Python dependencies and may take substanti
 - **Skills:** uses Studio's existing Skills support alongside the container MCP integration.
 - **Automations:** exposes Studio's scheduler for predefined prompts, chosen models, timezone-aware one-time or recurring schedules, notifications, and run history.
 - **Chat titles:** model-generated names for new conversations are enabled by default, using Studio’s native title generator.
+- **Browser reliability:** native load listeners register before pages open, including agent tabs. Temporary GET/proxy failures get bounded retries; submissions and blocked sites are not replayed. Startup renders even if optional initialization fails or stalls.
 - **Navigation:** individual visibility switches for main sidebar entries, including New Chat and Automations.
 
 Automations require Studio to be running when they are due. They do not wake a sleeping or powered-off computer.
