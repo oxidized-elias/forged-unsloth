@@ -279,3 +279,95 @@ def test_stop_timeout_and_reused_pid(monkeypatch):
     monkeypatch.setattr(arch.time, 'monotonic', lambda: next(clock))
     with pytest.raises(arch.InstallError, match='did not stop'):
         arch.ensure_stopped()
+
+
+def complete_cached_package(source, provenance):
+    import hashlib
+    directory = source / '.forged-build/arch'
+    directory.mkdir(parents=True, exist_ok=True)
+    package = directory / 'forged-unsloth-0.1.0-1-x86_64.pkg.tar.zst'
+    package.write_bytes(b'finished package')
+    arch.atomic_json(source / '.forged-build/completed.json', {
+        'commit': provenance['commit'], 'plugin': arch.plugin_build_fingerprint(),
+        'sha256': hashlib.sha256(package.read_bytes()).hexdigest()})
+    return package
+
+
+def test_cached_build_requires_same_commit_plugin_and_package_checksum(tmp_path, upstream):
+    data = tmp_path / 'data'
+    source, provenance = arch.stage_source(data, local_source=upstream)
+    provenance['repository'] = arch.UPSTREAM
+    arch.atomic_json(source / 'forged-build.json', provenance)
+    package = complete_cached_package(source, provenance)
+    assert arch.cached_build(data, provenance) == (source, provenance, package)
+    assert arch.cached_build(data, {**provenance, 'commit': 'different'}) is None
+    package.write_bytes(b'corrupted package')
+    assert arch.cached_build(data, provenance) is None
+    complete_cached_package(source, provenance)
+    (source / 'plugins/forged-unsloth/frontend/forged.css').write_text('changed plugin')
+    assert arch.cached_build(data, provenance) is None
+
+
+def test_resume_finishes_package_without_fetching_building_or_provisioning(tmp_path, upstream, monkeypatch):
+    source, provenance = arch.stage_source(tmp_path / 'data', local_source=upstream)
+    package = complete_cached_package(source, provenance)
+    commands = []
+    monkeypatch.setattr(arch, 'run', lambda args, **kwargs: commands.append(args))
+    monkeypatch.setattr(arch, 'matching_backend', lambda source: tmp_path / 'python')
+    monkeypatch.setattr(arch, 'ensure_stopped', lambda **kw: None)
+    monkeypatch.setattr(arch, 'backup_user_state', lambda *a: tmp_path / 'backup')
+    monkeypatch.setattr(arch.shutil, 'which', lambda command: '/usr/bin/' + command)
+    for name in ['stage_source', 'build_desktop', 'provision_backend']:
+        monkeypatch.setattr(arch, name, lambda *a, **kw: pytest.fail('Resume fetched, built or provisioned'))
+    data = tmp_path / 'resume-data'
+    assert arch.main(['--resume', str(source), '--data-dir', str(data), '--no-overwrite-agents']) == 0
+    assert ['sudo', 'pacman', '-U', package] in commands
+    receipt = json.loads((data / 'installation.json').read_text())
+    assert receipt['package'] == str(package) and receipt['agents'] is None
+
+
+def test_normal_retry_automatically_skips_finished_compilation(tmp_path, upstream, monkeypatch):
+    data = tmp_path / 'data'
+    source, provenance = arch.stage_source(data, local_source=upstream)
+    provenance['repository'] = arch.UPSTREAM
+    arch.atomic_json(source / 'forged-build.json', provenance)
+    package = complete_cached_package(source, provenance)
+    monkeypatch.setattr(arch, 'stage_source', lambda *a, **kw: (source, provenance))
+    monkeypatch.setattr(arch, 'run', lambda *a, **kw: None)
+    monkeypatch.setattr(arch, 'matching_backend', lambda source: tmp_path / 'python')
+    monkeypatch.setattr(arch, 'ensure_stopped', lambda **kw: None)
+    monkeypatch.setattr(arch, 'backup_user_state', lambda *a: tmp_path / 'backup')
+    monkeypatch.setattr(arch.shutil, 'which', lambda command: '/usr/bin/' + command)
+    for name in ['build_desktop', 'ensure_dependencies', 'provision_backend']:
+        monkeypatch.setattr(arch, name, lambda *a, **kw: pytest.fail('Completed work repeated'))
+    assert arch.main(['--data-dir', str(data), '--skip-container', '--no-overwrite-agents']) == 0
+    assert json.loads((data / 'installation.json').read_text())['package'] == str(package)
+
+
+def test_piped_installer_child_reads_confirmation_from_controlling_terminal():
+    import pty
+    pid, master = pty.fork()
+    if pid == 0:
+        try:
+            # Simulate curl | bash: stdin is EOF, but /dev/tty remains available.
+            with open(os.devnull) as empty:
+                os.dup2(empty.fileno(), 0)
+            arch.run([os.sys.executable, '-c', "assert input('Proceed? ') == 'yes'"])
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    try:
+        os.write(master, b'yes\n')
+        output = b''
+        while True:
+            try:
+                block = os.read(master, 4096)
+            except OSError:
+                break
+            if not block:
+                break
+            output += block
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors='replace')
+    finally:
+        os.close(master)

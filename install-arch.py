@@ -45,9 +45,21 @@ class InstallError(RuntimeError):
 def run(arguments, *, cwd=None, env=None, capture=False):
     arguments = [str(value) for value in arguments]
     print("+ " + shlex.join(arguments), flush=True)
-    return subprocess.run(arguments, cwd=cwd, env=env, check=True, text=True,
-                          stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.PIPE if capture else None)
+    terminal = None
+    if not capture and not sys.stdin.isatty():
+        try:
+            terminal = open("/dev/tty", "r")
+        except OSError as error:
+            if arguments[0] == "sudo":
+                raise InstallError("A terminal is required for sudo/pacman confirmation. Rerun this command from a terminal.") from error
+    try:
+        return subprocess.run(arguments, cwd=cwd, env=env, check=True, text=True,
+                              stdin=terminal,
+                              stdout=subprocess.PIPE if capture else None,
+                              stderr=subprocess.PIPE if capture else None)
+    finally:
+        if terminal:
+            terminal.close()
 
 
 def atomic_json(path, data):
@@ -344,6 +356,106 @@ def customize(args, ask=None):
             terminal_output.close()
 
 
+def plugin_build_fingerprint(root=PLUGIN):
+    digest = hashlib.sha256()
+    files = [root / "install.py"]
+    for name in ("backend", "frontend"):
+        files.extend(path for path in (root / name).rglob("*")
+                     if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc")
+    for path in sorted(files):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
+def completed_package(source, provenance):
+    packages = [path for path in (source / ".forged-build/arch").glob("forged-unsloth-*.pkg.tar.*")
+                if not path.name.endswith(".sig")]
+    if len(packages) != 1:
+        return None
+    plugin = source / "plugins/forged-unsloth"
+    try:
+        if plugin_build_fingerprint(plugin) != plugin_build_fingerprint():
+            return None
+        marker = source / ".forged-build/completed.json"
+        if marker.exists():
+            record = json.loads(marker.read_text())
+            if (record.get("commit") != provenance["commit"] or
+                    record.get("plugin") != plugin_build_fingerprint() or
+                    record.get("sha256") != hashlib.sha256(packages[0].read_bytes()).hexdigest()):
+                return None
+        else:
+            # Earlier installers did not write a completion marker. A finished archive
+            # plus its native executable can be reused after injection verification.
+            binary = source / ".forged-build/target/release/unsloth-studio"
+            if not binary.is_file() or not os.access(binary, os.X_OK):
+                return None
+        return packages[0]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def cached_build(data_dir, provenance):
+    if provenance.get("repository") != UPSTREAM:
+        return None
+    sources = data_dir / "sources"
+    if not sources.exists():
+        return None
+    for source in sorted(sources.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            previous = json.loads((source / "forged-build.json").read_text())
+            if previous.get("repository") != provenance["repository"] or previous.get("commit") != provenance["commit"]:
+                continue
+            package = completed_package(source, previous)
+            if package:
+                run([sys.executable, source / "plugins/forged-unsloth/install.py", "verify", "--studio", source / "studio"])
+                return source, previous, package
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            continue
+    return None
+
+
+def finish_install(source, provenance, package, data_dir, args, runtime, backup):
+    ensure_stopped(non_interactive=args.non_interactive)
+    if package is not None:
+        run(["sudo", "pacman", "-U", package])
+    agents = install_agents_template(data_dir, Path.home() / ".unsloth/studio") if args.overwrite_agents else None
+    atomic_json(data_dir / "installation.json", {**provenance, "package": str(package) if package else None,
+                "backup": str(backup), "python": str(runtime), "agents": agents})
+    print(("\nForged Unsloth installed. Launch: forged-unsloth\n" if package else "\nInjected backend installed. Desktop package preserved; use the injected source/API until you build its matching desktop.\n")
+          + f"Keep {source}: the backend imports it.\n"
+          "Rerun this installer to fetch and rebuild a newer upstream version.\n"
+          "To restore the official desktop package: paru -S unsloth-bin; then use its repair/update flow for the backend.")
+
+
+def matching_backend(source):
+    runtime = Path.home() / ".unsloth/studio/unsloth_studio/bin/python"
+    if not runtime.is_file():
+        return None
+    try:
+        result = run([runtime, "-c", "import pathlib,studio; print(pathlib.Path(studio.__file__).resolve().parent)"],
+                     cwd=Path("/tmp"), capture=True)
+        return runtime if Path(result.stdout.strip()) == source / "studio" else None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def resume_install(source, data_dir, args):
+    source = source.expanduser().resolve(strict=True)
+    provenance = json.loads((source / "forged-build.json").read_text())
+    package = completed_package(source, provenance)
+    if package is None:
+        raise InstallError("No completed package matching this plugin was found. Rerun the normal installer to build it.")
+    run([sys.executable, source / "plugins/forged-unsloth/install.py", "verify", "--studio", source / "studio"])
+    runtime = matching_backend(source)
+    if runtime is None:
+        raise InstallError("The installed backend does not match this build. Rerun the normal installer to provision it.")
+    print(f"Resuming completed build: {package}; compilation and backend provisioning skipped.", flush=True)
+    ensure_stopped(non_interactive=args.non_interactive)
+    backup = backup_user_state(data_dir, Path.home() / ".unsloth/studio")
+    finish_install(source, provenance, package, data_dir, args, runtime, backup)
+    return 0
+
+
 def build_desktop(source):
     run(["npm", "ci", "--ignore-scripts"], cwd=source / "studio")
     run(["npm", "ci", "--ignore-scripts"], cwd=source / "studio/frontend")
@@ -427,6 +539,9 @@ package() {{
     packages = [path for path in packages if not path.name.endswith(".sig")]
     if len(packages) != 1:
         raise InstallError(f"Expected one Arch package in {directory}, found {len(packages)}")
+    atomic_json(source / ".forged-build/completed.json", {
+        "commit": provenance["commit"], "plugin": plugin_build_fingerprint(),
+        "sha256": hashlib.sha256(packages[0].read_bytes()).hexdigest()})
     return packages[0]
 
 
@@ -462,6 +577,7 @@ def parser():
     result.add_argument("--ref", default="main", help="Git branch, tag or commit to fetch (default: main)")
     result.add_argument("--source", type=Path, help="Snapshot an existing checkout instead of downloading")
     result.add_argument("--data-dir", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "forged-unsloth")
+    result.add_argument("--resume", type=Path, help="Finish installing a completed source snapshot without rebuilding or provisioning")
     result.add_argument("--customize", action="store_true", help="Choose installation mode and overwrites interactively")
     result.add_argument("--non-interactive", action="store_true", help="Use command-line choices without the customization menu")
     result.add_argument("--overwrite-agents", action=argparse.BooleanOptionalAction, default=True,
@@ -477,6 +593,12 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.plan and args.resume is not None:
+        print(f"Resume completed snapshot: {args.resume}\n"
+              "Verify plugin/build integrity and the already provisioned backend; ask to stop running Unsloth.\n"
+              "Back up state, install the existing Arch package, apply the AGENTS.md choice, and record completion.\n"
+              "No download, compilation, or backend provisioning.")
+        return 0
     if args.plan:
         print("1. Fetch official Unsloth main (or --repository/--ref), or snapshot --source.\n"
               "2. Inject Forged Unsloth; reject incompatible sources before changing the installed app.\n"
@@ -488,11 +610,11 @@ def main(argv=None):
               "Source snapshots are retained because the Python runtime uses an editable installation.\n"
               "--build-only stops before steps 4–6. --fetch-only stops after step 2.")
         return 0
-    if args.customize and not args.non_interactive:
+    if args.customize and not args.non_interactive and args.resume is None:
         args = customize(args)
     modes = [args.agents_only, args.backend_only, args.build_only, args.fetch_only]
-    if sum(modes) > 1:
-        raise InstallError("Choose only one of --agents-only, --backend-only, --build-only and --fetch-only")
+    if sum(modes) > 1 or (args.resume is not None and (any(modes) or args.source is not None)):
+        raise InstallError("Choose only one installation mode; --resume cannot be combined with --source or another mode")
     if platform.system() != "Linux" or os.geteuid() == 0:
         raise InstallError("Run this script on Arch Linux as your regular user, not with sudo.")
     data_dir = args.data_dir.expanduser().resolve()
@@ -504,6 +626,8 @@ def main(argv=None):
         return 0
     if not shutil.which("pacman") or not shutil.which("makepkg"):
         raise InstallError("Arch Linux with pacman and makepkg is required. Install pacman/base-devel first.")
+    if args.resume is not None:
+        return resume_install(args.resume, data_dir, args)
     if not args.fetch_only and not args.build_only:
         ensure_stopped(non_interactive=args.non_interactive)
     # Bootstrap Git only when fetching needs it; full dependencies wait until injection validates.
@@ -516,9 +640,19 @@ def main(argv=None):
     print(f"Pinned upstream commit: {provenance['commit']}\nPersistent source: {source}", flush=True)
     if args.fetch_only:
         return 0
-    ensure_dependencies(not args.skip_container and not args.build_only)
     package = None
     if not args.backend_only:
+        cached = cached_build(data_dir, provenance)
+        if cached:
+            source, provenance, package = cached
+            print(f"Reusing completed build for the same Unsloth commit and plugin: {package}", flush=True)
+    if package is None:
+        ensure_dependencies(not args.skip_container and not args.build_only)
+    elif not args.skip_container and not args.build_only:
+        missing = missing_dependencies(CONTAINER_DEPS)
+        if missing:
+            run(["sudo", "pacman", "-S", "--needed", *missing])
+    if not args.backend_only and package is None:
         binary = build_desktop(source)
         package = package_desktop(source, binary, provenance)
         print(f"Arch package: {package}", flush=True)
@@ -529,19 +663,13 @@ def main(argv=None):
     if not args.skip_container:
         prepare_containers()
     backup = backup_user_state(data_dir, Path.home() / ".unsloth/studio")
-    runtime = provision_backend(source)
+    runtime = matching_backend(source) if package is not None else None
+    if runtime is None:
+        runtime = provision_backend(source)
+    else:
+        print("Matching backend already provisioned; skipping backend installation.", flush=True)
     run([sys.executable, source / "plugins/forged-unsloth/install.py", "verify", "--studio", source / "studio"])
-    # Recheck: do not swap the desktop if it was reopened during provisioning.
-    ensure_stopped(non_interactive=args.non_interactive)
-    if package is not None:
-        run(["sudo", "pacman", "-U", package])
-    agents = install_agents_template(data_dir, Path.home() / ".unsloth/studio") if args.overwrite_agents else None
-    atomic_json(data_dir / "installation.json", {**provenance, "package": str(package) if package else None,
-                "backup": str(backup), "python": str(runtime), "agents": agents})
-    print(("\nForged Unsloth installed. Launch: forged-unsloth\n" if package else "\nInjected backend installed. Desktop package preserved; use the injected source/API until you build its matching desktop.\n")
-          + f"Keep {source}: the backend imports it.\n"
-          "Rerun this installer to fetch and rebuild a newer upstream version.\n"
-          "To restore the official desktop package: paru -S unsloth-bin; then use its repair/update flow for the backend.")
+    finish_install(source, provenance, package, data_dir, args, runtime, backup)
     return 0
 
 

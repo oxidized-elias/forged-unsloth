@@ -73,6 +73,18 @@ curl -fsSL https://raw.githubusercontent.com/oxidized-elias/forged-unsloth/main/
 
 The stop prompt lists detected processes belonging to your user. Approval sends SIGTERM and waits up to 15 seconds; refusal or failure to stop cancels installation. It checks again before provisioning and replacing the desktop. `--non-interactive` never stops processes automatically: close Unsloth first.
 
+Interactive child commands, including sudo and pacman, also read `/dev/tty` when the installer is piped into Bash. Package-manager confirmations remain interactive.
+
+If an installation is interrupted after compilation, rerunning the installer automatically reuses a completed build for the same exact Unsloth commit and plugin code. It verifies injection and, for new builds, a recorded package checksum. Changed upstream commits or plugin code trigger a fresh build. An already matching backend is also reused. Incomplete compilation without a finished package is not treated as a completed build.
+
+To finish a particular completed build without downloading or compiling again (requires its matching backend to already be provisioned):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oxidized-elias/forged-unsloth/main/install.sh | bash -s -- --resume ~/.local/share/forged-unsloth/sources/unsloth-YOUR_SNAPSHOT
+```
+
+Resume still checks running processes, asks pacman for confirmation, backs up state, applies your AGENTS.md overwrite choice, and records the completed installation. Add `--no-overwrite-agents` to preserve memory.
+
 The menu reads `/dev/tty`, so it works when piped into Bash. For unattended use, add `--non-interactive` and your choices. The bootstrap requires Python 3 and curl; the full installer requires Arch Linux. Run it as a regular user.
 
 ## Installer options
