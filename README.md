@@ -4,7 +4,7 @@ A plugin and installer for customizing [Unsloth Studio](https://github.com/unslo
 
 ## Install on Arch Linux
 
-Close Unsloth Desktop and any separately running Studio API server, then run as your normal user:
+Run as your normal user. If Unsloth Desktop or a Studio API server is open, the installer asks permission to stop it before installation:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oxidized-elias/forged-unsloth/main/install.sh | bash
@@ -70,6 +70,8 @@ To replace only AGENTS.md without downloading or installing Unsloth:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/oxidized-elias/forged-unsloth/main/install.sh | bash -s -- --non-interactive --agents-only
 ```
+
+The stop prompt lists detected processes belonging to your user. Approval sends SIGTERM and waits up to 15 seconds; refusal or failure to stop cancels installation. It checks again before provisioning and replacing the desktop. `--non-interactive` never stops processes automatically: close Unsloth first.
 
 The menu reads `/dev/tty`, so it works when piped into Bash. For unattended use, add `--non-interactive` and your choices. The bootstrap requires Python 3 and curl; the full installer requires Arch Linux. Run it as a regular user.
 

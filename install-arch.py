@@ -14,11 +14,13 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,24 +134,77 @@ def ensure_dependencies(containers):
             raise InstallError(f"Required command is unavailable after dependency installation: {command}")
 
 
-def ensure_stopped():
-    result = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "unsloth-studio"],
-                            capture_output=True, check=False)
-    if result.returncode == 0:
-        raise InstallError("Close Unsloth Studio before installing. No running application will be killed.")
-    # A separately launched API backend also owns the runtime being changed.
-    root = Path("/proc")
-    for entry in root.iterdir():
+def running_unsloth(proc_root=Path("/proc")):
+    """Identify only this user's Studio desktop and API processes, with PID identities."""
+    found = []
+    for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            if entry.stat().st_uid != os.getuid() or int(entry.name) == os.getpid():
+            pid = int(entry.name)
+            if entry.stat().st_uid != os.getuid() or pid == os.getpid():
                 continue
-            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-            if ("python" in command and ("studio/backend/run.py" in command or "uvicorn main:app" in command)) or "unsloth studio -" in command:
-                raise InstallError("A Studio API backend is running. Stop it before installing.")
+            arguments = (entry / "cmdline").read_bytes().split(b"\0")
+            arguments = [item.decode(errors="replace") for item in arguments if item]
+            if not arguments:
+                continue
+            executable = Path(arguments[0]).name
+            command = " ".join(arguments)
+            desktop = executable in {"unsloth-studio", "forged-unsloth"}
+            python = executable.startswith("python")
+            backend = python and any(item.endswith("studio/backend/run.py") for item in arguments[1:])
+            backend = backend or (python and "studio.backend.run" in arguments)
+            cli = executable == "unsloth" or (python and len(arguments) > 1 and Path(arguments[1]).name == "unsloth")
+            backend = backend or (cli and "studio" in arguments[1:])
+            backend = backend or (python and any(item.endswith("forged-unsloth/serve.py") for item in arguments[1:]) and "--studio" in arguments)
+            if (python or executable == "uvicorn") and "uvicorn" in command and "main:app" in arguments:
+                cwd = (entry / "cwd").resolve()
+                backend = backend or (cwd.name == "backend" and cwd.parent.name == "studio")
+            if desktop or backend:
+                # /proc stat's second field may contain spaces and parentheses.
+                started = (entry / "stat").read_text().rsplit(")", 1)[1].split()[19]
+                found.append({"pid": pid, "started": started,
+                              "name": "Unsloth Desktop" if desktop else "Studio API"})
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
+    return found
+
+
+def confirm_stop(prompt):
+    try:
+        with open("/dev/tty", "r") as reader, open("/dev/tty", "w") as writer:
+            writer.write(prompt + " [y/N]: ")
+            writer.flush()
+            return reader.readline().strip().lower() in {"y", "yes"}
+    except OSError as error:
+        raise InstallError("Unsloth is running. Close it first, or rerun the installer in a terminal to approve stopping it.") from error
+
+
+def ensure_stopped(*, non_interactive=False):
+    processes = running_unsloth()
+    if not processes:
+        return
+    print("Detected running Unsloth processes:", flush=True)
+    for process in processes:
+        print(f"  {process['name']} (PID {process['pid']})", flush=True)
+    if non_interactive:
+        raise InstallError("Unsloth is running. Close it before using --non-interactive; no processes were stopped.")
+    if not confirm_stop("Stop these Unsloth processes before continuing? Active generations will stop"):
+        raise InstallError("Installation cancelled; Unsloth was left running.")
+    # Recheck identity immediately before signaling, so an exited/reused PID is skipped.
+    current = {(item["pid"], item["started"]) for item in running_unsloth()}
+    for process in processes:
+        if (process["pid"], process["started"]) in current:
+            try:
+                os.kill(process["pid"], signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 15
+    while running_unsloth():
+        if time.monotonic() >= deadline:
+            raise InstallError("Unsloth did not stop within 15 seconds. Close the remaining processes before retrying; installation has not continued.")
+        time.sleep(0.2)
+    print("Unsloth stopped. Continuing installation.", flush=True)
 
 
 def backup_user_state(data_dir, studio_home):
@@ -450,7 +505,7 @@ def main(argv=None):
     if not shutil.which("pacman") or not shutil.which("makepkg"):
         raise InstallError("Arch Linux with pacman and makepkg is required. Install pacman/base-devel first.")
     if not args.fetch_only and not args.build_only:
-        ensure_stopped()
+        ensure_stopped(non_interactive=args.non_interactive)
     # Bootstrap Git only when fetching needs it; full dependencies wait until injection validates.
     if args.source is None and not shutil.which("git"):
         if args.fetch_only:
@@ -470,14 +525,14 @@ def main(argv=None):
     if args.build_only:
         print("Build only: per-user backend and installed package have not been changed.")
         return 0
-    ensure_stopped()
+    ensure_stopped(non_interactive=args.non_interactive)
     if not args.skip_container:
         prepare_containers()
     backup = backup_user_state(data_dir, Path.home() / ".unsloth/studio")
     runtime = provision_backend(source)
     run([sys.executable, source / "plugins/forged-unsloth/install.py", "verify", "--studio", source / "studio"])
     # Recheck: do not swap the desktop if it was reopened during provisioning.
-    ensure_stopped()
+    ensure_stopped(non_interactive=args.non_interactive)
     if package is not None:
         run(["sudo", "pacman", "-U", package])
     agents = install_agents_template(data_dir, Path.home() / ".unsloth/studio") if args.overwrite_agents else None

@@ -223,3 +223,59 @@ output.write_text("import json,sys; print(json.dumps(sys.argv))")
         arguments = json.loads(result.stdout)
         assert arguments[1:] == expected
         assert not Path(arguments[0]).parent.exists()
+
+
+def test_detect_only_studio_processes_and_skip_self(tmp_path):
+    def process(pid, args, cwd=None):
+        entry = tmp_path / str(pid)
+        entry.mkdir()
+        (entry / 'cmdline').write_bytes(b'\0'.join(item.encode() for item in args) + b'\0')
+        (entry / 'stat').write_text(f'{pid} (test process) S ' + ' '.join(['0'] * 18 + ['1234']))
+        if cwd:
+            (entry / 'cwd').symlink_to(cwd)
+    process(101, ['/usr/bin/unsloth-studio'])
+    process(102, ['/venv/bin/python', '/venv/bin/unsloth', 'studio', '--backend'])
+    process(103, ['/venv/bin/python', '/project/studio/backend/run.py'])
+    process(104, ['python', '/plugins/forged-unsloth/serve.py', '--studio', '/project/studio'])
+    process(105, ['python', '-m', 'uvicorn', 'main:app'], tmp_path / 'project/studio/backend')
+    process(106, ['python', '-m', 'uvicorn', 'main:app'], tmp_path / 'other-app')
+    process(107, ['bash', '-c', 'python /project/studio/backend/run.py'])
+    process(os.getpid(), ['/usr/bin/unsloth-studio'])
+    found = arch.running_unsloth(tmp_path)
+    assert {item['pid'] for item in found} == {101, 102, 103, 104, 105}
+    assert all(item['started'] == '1234' for item in found)
+
+
+def test_stop_prompt_approval_signals_only_detected_process(monkeypatch):
+    process = {'pid': 12345, 'started': '100', 'name': 'Unsloth Desktop'}
+    results = iter([[process], [process], []])
+    monkeypatch.setattr(arch, 'running_unsloth', lambda: next(results))
+    monkeypatch.setattr(arch, 'confirm_stop', lambda prompt: True)
+    signals = []
+    monkeypatch.setattr(arch.os, 'kill', lambda *args: signals.append(args))
+    arch.ensure_stopped()
+    assert signals == [(12345, arch.signal.SIGTERM)]
+
+
+def test_stop_prompt_decline_and_unattended_leave_processes_alone(monkeypatch):
+    monkeypatch.setattr(arch, 'running_unsloth', lambda: [{'pid': 12345, 'started': '100', 'name': 'Studio API'}])
+    monkeypatch.setattr(arch.os, 'kill', lambda *a: pytest.fail('Unapproved signal'))
+    monkeypatch.setattr(arch, 'confirm_stop', lambda prompt: False)
+    with pytest.raises(arch.InstallError, match='left running'):
+        arch.ensure_stopped()
+    monkeypatch.setattr(arch, 'confirm_stop', lambda prompt: pytest.fail('Unattended prompt'))
+    with pytest.raises(arch.InstallError, match='non-interactive'):
+        arch.ensure_stopped(non_interactive=True)
+
+
+def test_stop_timeout_and_reused_pid(monkeypatch):
+    first = {'pid': 12345, 'started': '100', 'name': 'Studio API'}
+    reused = {**first, 'started': '200'}
+    results = iter([[first], [reused], [reused]])
+    monkeypatch.setattr(arch, 'running_unsloth', lambda: next(results))
+    monkeypatch.setattr(arch, 'confirm_stop', lambda prompt: True)
+    monkeypatch.setattr(arch.os, 'kill', lambda *a: pytest.fail('Reused PID signaled'))
+    clock = iter([0, 16])
+    monkeypatch.setattr(arch.time, 'monotonic', lambda: next(clock))
+    with pytest.raises(arch.InstallError, match='did not stop'):
+        arch.ensure_stopped()
