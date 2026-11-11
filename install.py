@@ -22,9 +22,13 @@ def patches():
         "frontend/src/features/settings/stores/appearance-custom-store.ts": [
             ('  tasks: false,', '  tasks: true,'),
         ],
+        "frontend/src/features/chat/stores/chat-runtime-store.ts": [
+            ('  autoTitle: false,', '  autoTitle: true,'),
+        ],
         "frontend/src/features/chat/shared-composer.tsx": [
-            ('import { AiSpeechIcon, BookmarkIcon, FileSearchIcon } from "@/lib/hugeicons-derived";', 'import { AiSpeechIcon, BookmarkIcon, FileSearchIcon } from "@/lib/hugeicons-derived";\nimport { AgenticPill } from "@/forged-unsloth/agentic";'),
-            ('            <BrowserAgentPill glyph={(icon) => <PillGlyph>{icon}</PillGlyph>} />', '            <AgenticPill />\n            <BrowserAgentPill glyph={(icon) => <PillGlyph>{icon}</PillGlyph>} />'),
+            ('  function stop() {', '  function stop() {\n    void interruptAgenticWorkspace().catch(() => undefined);'),
+            ('import { AiSpeechIcon, BookmarkIcon, FileSearchIcon } from "@/lib/hugeicons-derived";', 'import { AiSpeechIcon, BookmarkIcon, FileSearchIcon } from "@/lib/hugeicons-derived";\nimport { AgenticPill, interruptAgenticWorkspace } from "@/forged-unsloth/agentic";'),
+            ('            <BrowserAgentPill glyph={(icon) => <PillGlyph>{icon}</PillGlyph>} />', '            <AgenticPill onStopGeneration={stop} />\n            <BrowserAgentPill glyph={(icon) => <PillGlyph>{icon}</PillGlyph>} />'),
         ],
         "frontend/src/features/scheduled-tasks/tasks-page.tsx": [
             ('{t("scheduledTasks.title")}', 'Automations'),

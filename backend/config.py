@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 LOCK = threading.RLock()
+DEFAULT_IMAGE = "docker.io/library/debian:13-slim"
 
 
 def home():
@@ -15,10 +16,13 @@ def home():
 def read():
     with LOCK:
         path = home() / "config.json"
-        return json.loads(path.read_text()) if path.exists() else {
-            "enabled": False, "image": "docker.io/library/python:3.12-slim",
-            "folders": [], "network": False,
-        }
+        value = json.loads(path.read_text()) if path.exists() else {}
+        # Migrate the former Python-only defaults, while preserving custom images and
+        # subsequent explicit offline choices saved with the new Debian image.
+        if value.get("image") == "docker.io/library/python:3.12-slim":
+            value = {**value, "image": DEFAULT_IMAGE, "network": True}
+        return {"enabled": False, "image": DEFAULT_IMAGE, "folders": [], "network": True, **value}
+
 
 
 def write(value, name="config.json"):

@@ -12,20 +12,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("forged_unsloth", ROOT / "backend/__init__.py", submodule_search_locations=[str(ROOT / "backend")])
-package = importlib.util.module_from_spec(spec)
-sys.modules["forged_unsloth"] = package
-spec.loader.exec_module(package)
 from forged_unsloth import config, container, guard, plugin
 
 
-@pytest.fixture(autouse=True)
-def isolated_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("FORGED_UNSLOTH_HOME", str(tmp_path / "private"))
-
-
 def settings(**overrides):
-    return {"enabled": True, "network": False, "image": "docker.io/library/python:3.12-slim", "folders": [], **overrides}
+    return {"enabled": True, "network": False, "image": "docker.io/library/debian:13-slim", "folders": [], **overrides}
 
 
 def test_mount_validation(tmp_path):
@@ -46,11 +37,13 @@ def test_container_argv_and_secrets(tmp_path):
     folder.mkdir()
     argv = container.argv(settings(folders=[str(folder)]), "test-name")
     assert "--network=none" in argv
-    assert "--cap-drop=ALL" in argv and "--read-only" in argv
-    assert "--userns=keep-id" in argv and "--pull=never" in argv
+    assert "--cap-drop=ALL" in argv and "--read-only" not in argv
+    assert "--user=0:0" in argv and "--cap-add=SETUID" in argv
+    assert "--userns=host" not in argv and "--pull=missing" in argv
+    assert argv[:2] == ["podman", "create"] and "--rm" not in argv
     assert f"type=bind,src={folder},dst=/projects/0" in argv
     assert not any("socket" in arg or "privileged" in arg for arg in argv)
-    assert "--network=slirp4netns" in container.argv(settings(network=True), "test")
+    assert "--network=pasta:--no-map-gw" in container.argv(settings(network=True), "test")
     config.write(settings())
     assert (config.home() / "config.json").stat().st_mode & 0o777 == 0o600
 
@@ -86,6 +79,10 @@ def fake_modules(monkeypatch):
     utils.account_context = types.SimpleNamespace(is_owner_context=lambda: True)
     utils.remote_access_settings = types.SimpleNamespace(_admin_password_ready=lambda: False)
     utils.lan_access_settings = types.SimpleNamespace(_admin_password_ready=lambda: False)
+    storage = types.ModuleType("storage")
+    storage.studio_db = types.SimpleNamespace(upsert_chat_settings_merge=Mock())
+    monkeypatch.setitem(sys.modules, "storage", storage)
+    monkeypatch.setitem(sys.modules, "storage.studio_db", storage.studio_db)
     for name, value in {"auth": auth, "auth.storage": auth.storage, "auth.authentication": auth.authentication, "utils": utils, "utils.account_context": utils.account_context}.items():
         monkeypatch.setitem(sys.modules, name, value)
     return records
@@ -104,6 +101,8 @@ def test_key_rotation_and_owner_boundary(monkeypatch):
         first = response.json()["api_key"]
         assert client.get("/api/forged/connect", headers={"Authorization": f"Bearer {first}"}).status_code == 200
         assert client.get("/api/forged/status", headers={"Authorization": f"Bearer {first}"}).status_code == 403
+        assert client.post("/api/forged/workspace/interrupt", headers={"Authorization": f"Bearer {first}"}).status_code == 403
+        assert client.post("/api/forged/workspace/interrupt", headers=owner).json()["preserved"] is True
         assert client.put("/api/forged/workspace", headers={"Authorization": f"Bearer {first}"}, json=settings()).status_code == 403
         second = client.post("/api/forged/key/rotate", headers=owner).json()["api_key"]
         assert first != second and not records[1]["active"]

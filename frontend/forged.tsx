@@ -104,8 +104,8 @@ function ForgedPanel() {
 	const [status, setStatus] = useState<Status | null>(null);
 	const [settings, setSettings] = useState<Workspace>({
 		enabled: false,
-		network: false,
-		image: "docker.io/library/python:3.12-slim",
+		network: true,
+		image: "docker.io/library/debian:13-slim",
 		folders: [],
 	});
 	const [folders, setFolders] = useState("");
@@ -423,8 +423,9 @@ function ForgedPanel() {
 					/>
 				</label>
 				<p>
-					Pull the image with Podman before using it. The default image includes
-					Python and a shell.
+					The default is a persistent Debian sandbox. The model can use apt-get,
+					download installers, and run any language or application inside it.
+					Installed tools remain available between commands.
 				</p>
 				<label>
 					Connected folders — one absolute path per line
@@ -436,8 +437,9 @@ function ForgedPanel() {
 					/>
 				</label>
 				<p>
-					Mounted at /projects/0, /projects/1, … . /workspace persists between
-					calls.
+					Mounted at /projects/0, /projects/1, … . Files, installed packages,
+					and /root persist. Changing the image, folders, or network policy
+					selects a different sandbox; the previous one is kept stopped.
 				</p>
 				<label>
 					<input
@@ -447,7 +449,7 @@ function ForgedPanel() {
 							setSettings({ ...settings, network: event.target.checked })
 						}
 					/>
-					Allow container network access
+					Allow downloads and network access (on by default)
 				</label>
 				<button
 					onClick={() =>
@@ -487,6 +489,18 @@ function ForgedPanel() {
 					}
 				>
 					Save workspace
+				</button>
+				<button
+					onClick={() =>
+						void run(async () => {
+							await request("/workspace/interrupt", "POST");
+							setMessage(
+								"Sandbox interrupted. Installed tools and files are preserved; the next command can restart it.",
+							);
+						})
+					}
+				>
+					Interrupt sandbox
 				</button>
 				<p>
 					Containers are tools, available alongside Studio’s existing Skills.

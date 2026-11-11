@@ -165,3 +165,61 @@ def test_standalone_payload_is_reproducible_and_can_fetch_and_inject(tmp_path, u
     clones = list((tmp_path / "portable-data/sources").iterdir())
     assert len(clones) == 1
     injector.verify(clones[0] / "studio")
+
+
+def test_memory_template_replacement_backs_up_original_and_refuses_symlinks(tmp_path):
+    studio = tmp_path / 'studio'
+    studio.mkdir()
+    target = studio / 'AGENTS.md'
+    target.write_text('original local instructions')
+    target.chmod(0o640)
+    receipt = arch.install_agents_template(tmp_path / 'data', studio)
+    assert target.read_bytes() == (ROOT / 'templates/AGENTS.md').read_bytes()
+    backup = Path(receipt['backup'])
+    assert backup.read_text() == 'original local instructions'
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert target.stat().st_mode & 0o777 == 0o640
+    target.unlink()
+    target.symlink_to(backup)
+    with pytest.raises(arch.InstallError, match='symlink'):
+        arch.install_agents_template(tmp_path / 'data', studio)
+    assert backup.read_text() == 'original local instructions'
+
+
+def test_customization_can_preserve_memory_and_skip_container(capsys):
+    answers = iter(['1', '', '', 'n', 'n', 'y'])
+    args = arch.customize(arch.parser().parse_args([]), ask=lambda prompt: next(answers))
+    assert args.skip_container and not args.overwrite_agents
+    assert not any([args.backend_only, args.build_only, args.fetch_only, args.agents_only])
+    assert 'AGENTS.md: keep' in capsys.readouterr().out
+
+
+def test_customization_cancellation_and_memory_only_mode(tmp_path, monkeypatch):
+    answers = iter(['5', 'y', 'n'])
+    with pytest.raises(arch.InstallError, match='cancelled'):
+        arch.customize(arch.parser().parse_args([]), ask=lambda prompt: next(answers))
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(arch, 'run', lambda *a, **kw: pytest.fail('Memory-only ran a command'))
+    assert arch.main(['--agents-only', '--no-overwrite-agents']) == 0
+    assert not (tmp_path / '.unsloth').exists()
+    assert arch.main(['--agents-only', '--data-dir', str(tmp_path / 'data')]) == 0
+    assert (tmp_path / '.unsloth/studio/AGENTS.md').read_bytes() == (ROOT / 'templates/AGENTS.md').read_bytes()
+
+
+def test_bootstrap_forwards_choices_and_cleans_download(tmp_path):
+    # A fake curl downloads a tiny argument recorder; no network or app install occurs.
+    tools = tmp_path / 'bin'
+    tools.mkdir()
+    fake_curl = tools / 'curl'
+    fake_curl.write_text('''#!/usr/bin/env python3
+import pathlib,sys
+output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])
+output.write_text("import json,sys; print(json.dumps(sys.argv))")
+''')
+    fake_curl.chmod(0o755)
+    env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH']}
+    for options, expected in [([], ['--customize']), (['--non-interactive', '--agents-only', '--no-overwrite-agents'], ['--non-interactive', '--agents-only', '--no-overwrite-agents'])]:
+        result = subprocess.run(['bash', ROOT / 'install.sh', *options], env=env, capture_output=True, text=True, check=True)
+        arguments = json.loads(result.stdout)
+        assert arguments[1:] == expected
+        assert not Path(arguments[0]).parent.exists()

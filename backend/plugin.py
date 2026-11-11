@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from . import config
+from . import config, container
 
 KEY_LOCK = threading.RLock()
 KEY_NAME = "Forged Unsloth startup key"
@@ -37,6 +37,15 @@ def current_key():
     with KEY_LOCK:
         path = config.home() / "api-key.json"
         return json.loads(path.read_text())["api_key"] if path.exists() else rotate_key()
+
+
+def initialize_defaults():
+    path = config.home() / "defaults.json"
+    defaults = json.loads(path.read_text()) if path.exists() else {}
+    if not defaults.get("automatic_titles"):
+        from storage.studio_db import upsert_chat_settings_merge
+        upsert_chat_settings_merge({"autoTitle": True})
+        config.write({**defaults, "automatic_titles": True}, "defaults.json")
 
 
 def install(app):
@@ -71,7 +80,7 @@ def install(app):
     class WorkspaceConfig(BaseModel):
         model_config = ConfigDict(extra="forbid")
         enabled: StrictBool
-        network: StrictBool = False
+        network: StrictBool = True
         image: str = Field(min_length=1, max_length=512)
         folders: list[str] = Field(default_factory=list, max_length=32)
 
@@ -81,8 +90,15 @@ def install(app):
             settings = config.validate(body.model_dump())
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
-        config.write(settings)
-        return settings
+        return container.configure(settings)
+
+    @router.post("/workspace/interrupt")
+    def interrupt_workspace():
+        return container.interrupt()
+
+    @router.get("/workspace/status")
+    def workspace_status():
+        return container.status()
 
     @app.get("/api/forged/connect")
     async def connect(subject=Depends(get_current_subject)):
@@ -96,6 +112,7 @@ def install(app):
         async with original(application) as state:
             from starlette.concurrency import run_in_threadpool
             await run_in_threadpool(rotate_key)
+            await run_in_threadpool(initialize_defaults)
             # Remote access now relies on the generated key rather than a changed password.
             from utils import remote_access_settings, lan_access_settings
             old_ready = remote_access_settings._admin_password_ready

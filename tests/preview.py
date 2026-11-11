@@ -16,20 +16,25 @@ if not (FRONTEND / "src/forged-unsloth/forged.tsx").is_file():
     parser.error("Inject Forged Unsloth into --studio before running this preview")
 html = FRONTEND / "forged-preview.html"
 entry = FRONTEND / "forged-preview.tsx"
-workspace = {"enabled": False, "network": False, "image": "docker.io/library/python:3.12-slim", "folders": []}
+workspace = {"enabled": False, "network": False, "image": "docker.io/library/debian:13-slim", "folders": []}
 key = "sk-unsloth-preview-only"
+podman_available = False
+interrupts = 0
 
 
 def handler(route):
-    global key, workspace
+    global key, workspace, interrupts
     path = route.request.url.split("/api/", 1)[1].split("?", 1)[0]
     if path == "forged/status":
-        result = {"config": workspace, "podman_available": False, "mcp_command": "python /preview/forged_unsloth/mcp.py"}
+        result = {"config": workspace, "podman_available": podman_available, "mcp_command": "python /preview/forged_unsloth/mcp.py"}
     elif path == "forged/key/rotate":
         key = "sk-unsloth-preview-rotated"
         result = {"api_key": key}
     elif path == "forged/key":
         result = {"api_key": key}
+    elif path == "forged/workspace/interrupt":
+        interrupts += 1
+        result = {"interrupted": True, "preserved": True}
     elif path == "forged/workspace":
         workspace = route.request.post_data_json
         result = workspace
@@ -71,6 +76,15 @@ try:
         assert badge.evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(217, 119, 87)"
         page.get_by_role("button", name="Enable Agentic workspace", exact=True).click()
         page.get_by_role("alert").filter(has_text="Install rootless Podman").wait_for()
+        page.get_by_role("alert").filter(has_text="Install rootless Podman").click()
+        podman_available = True
+        page.get_by_role("button", name="Enable Agentic workspace", exact=True).click()
+        page.get_by_role("button", name="Disable Agentic workspace", exact=True).wait_for()
+        page.get_by_role("button", name="Interrupt Agentic workspace", exact=True).click()
+        expect(page.get_by_role("button", name="Interrupt Agentic workspace", exact=True)).to_be_enabled()
+        assert interrupts == 1 and workspace["enabled"]
+        page.get_by_role("button", name="Disable Agentic workspace", exact=True).click()
+        page.get_by_role("button", name="Enable Agentic workspace", exact=True).wait_for()
         page.get_by_role("button", name="Open Automations", exact=True).wait_for()
         page.get_by_role("button", name="Reveal key", exact=True).click()
         page.get_by_label("API key", exact=True).wait_for()
@@ -88,14 +102,13 @@ try:
         page.get_by_label("MCP configuration", exact=False).fill('{"mcpServers": {}}')
         page.get_by_role("button", name="Import integrations", exact=True).click()
         page.get_by_text("Imported 0; skipped 0.", exact=False).wait_for()
-        page.get_by_role("alert").filter(has_text="Install rootless Podman").click()
         page.get_by_role("button", name="Hide", exact=True).click()
         assert page.get_by_label("API key", exact=True).get_attribute("type") == "password"
         assert not errors, errors
         artifacts = ROOT / "artifacts"
         artifacts.mkdir(exist_ok=True)
         page.screenshot(path=str(artifacts / "forged-unsloth.png"), full_page=True)
-        print("Browser smoke passed: About, orange badge, key reveal/rotation, navigation, workspace save, MCP import; no browser errors")
+        print("Browser smoke passed: About, orange badge, Agentic enable/interrupt/disable, key rotation, navigation, workspace save, MCP import; no browser errors")
         browser.close()
 finally:
     server.terminate()

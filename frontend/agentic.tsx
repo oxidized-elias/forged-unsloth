@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Box } from "lucide-react";
+import { Box, Square } from "lucide-react";
 import { authFetch } from "@/features/auth/api";
 import { useChatRuntimeStore } from "@/features/chat/stores/chat-runtime-store";
 import {
@@ -34,7 +34,35 @@ async function request<T>(
 	return result as T;
 }
 
-export function AgenticPill() {
+export async function interruptAgenticWorkspace() {
+	window.dispatchEvent(
+		new CustomEvent("forged-interrupt-state", { detail: { pending: true } }),
+	);
+	try {
+		const result = await request<{ interrupted: boolean }>(
+			"/workspace/interrupt",
+			"POST",
+		);
+		window.dispatchEvent(
+			new CustomEvent("forged-interrupt-state", { detail: { pending: false } }),
+		);
+		return result;
+	} catch (failure) {
+		window.dispatchEvent(
+			new CustomEvent("forged-interrupt-state", {
+				detail: {
+					pending: false,
+					error: failure instanceof Error ? failure.message : String(failure),
+				},
+			}),
+		);
+		throw failure;
+	}
+}
+
+export function AgenticPill({
+	onStopGeneration,
+}: { onStopGeneration?: () => void } = {}) {
 	const mcpEnabled = useChatRuntimeStore((state) => state.mcpEnabledForChat);
 	const setMcpEnabled = useChatRuntimeStore(
 		(state) => state.setMcpEnabledForChat,
@@ -45,6 +73,18 @@ export function AgenticPill() {
 	const [enabled, setEnabled] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
+	const [interrupting, setInterrupting] = useState(false);
+	useEffect(() => {
+		const update = (event: Event) => {
+			const detail = (
+				event as CustomEvent<{ pending: boolean; error?: string }>
+			).detail;
+			setInterrupting(detail.pending);
+			setError(detail.error || "");
+		};
+		window.addEventListener("forged-interrupt-state", update);
+		return () => window.removeEventListener("forged-interrupt-state", update);
+	}, []);
 	useEffect(() => {
 		let live = true;
 		const refresh = () => {
@@ -120,6 +160,23 @@ export function AgenticPill() {
 				<Box aria-hidden="true" className="size-4" />
 				<span>Agentic</span>
 			</button>
+			{enabled && (
+				<button
+					type="button"
+					className="composer-pill-btn"
+					data-pill-label="Interrupt"
+					aria-label="Interrupt Agentic workspace"
+					disabled={interrupting}
+					title="Stop the AI and all running sandbox commands. Installed tools and files are kept."
+					onClick={() => {
+						if (onStopGeneration) onStopGeneration();
+						else void interruptAgenticWorkspace().catch(() => undefined);
+					}}
+				>
+					<Square aria-hidden="true" className="size-3.5" />
+					<span>{interrupting ? "Interrupting…" : "Interrupt"}</span>
+				</button>
+			)}
 			{error && (
 				<span
 					role="alert"

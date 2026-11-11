@@ -31,13 +31,18 @@ export function ForgedAbout() {
 				</dd>
 				<dt>GUI agent workspace</dt>
 				<dd>
-					Rootless Podman tools with user-selected writable folders and optional
-					networking.
+					Persistent Debian container with package installation, downloads,
+					connected folders, and interruption.
 				</dd>
 				<dt>Automations</dt>
 				<dd>
 					Scheduled prompts with a chosen model, timezone-aware repeat
 					schedules, notifications, and run history.
+				</dd>
+				<dt>Chat titles</dt>
+				<dd>
+					Automatic model-generated names for new conversations, enabled by
+					default.
 				</dd>
 				<dt>Navigation</dt>
 				<dd>Individual visibility switches for all main sidebar tabs.</dd>
