@@ -140,7 +140,7 @@ def ensure_dependencies(containers):
     packages = list(dict.fromkeys(BUILD_DEPS + RUNTIME_DEPS + (CONTAINER_DEPS if containers else [])))
     missing = missing_dependencies(packages)
     if missing:
-        run(["sudo", "pacman", "-S", "--needed", *missing])
+        run(["sudo", "pacman", "-S", "--noconfirm", "--needed", *missing])
     for command in ("git", "python", "npm", "cargo", "makepkg", "pkg-config"):
         if not shutil.which(command):
             raise InstallError(f"Required command is unavailable after dependency installation: {command}")
@@ -417,7 +417,7 @@ def cached_build(data_dir, provenance):
 def finish_install(source, provenance, package, data_dir, args, runtime, backup):
     ensure_stopped(non_interactive=args.non_interactive)
     if package is not None:
-        run(["sudo", "pacman", "-U", package])
+        run(["sudo", "pacman", "-U", "--noconfirm", package])
     agents = install_agents_template(data_dir, Path.home() / ".unsloth/studio") if args.overwrite_agents else None
     atomic_json(data_dir / "installation.json", {**provenance, "package": str(package) if package else None,
                 "backup": str(backup), "python": str(runtime), "agents": agents})
@@ -634,7 +634,7 @@ def main(argv=None):
     if args.source is None and not shutil.which("git"):
         if args.fetch_only:
             raise InstallError("Install Git first, or omit --fetch-only to let this installer install it.")
-        run(["sudo", "pacman", "-S", "--needed", "git"])
+        run(["sudo", "pacman", "-S", "--noconfirm", "--needed", "git"])
     data_dir = args.data_dir.expanduser().resolve()
     source, provenance = stage_source(data_dir, repository=args.repository, ref=args.ref, local_source=args.source)
     print(f"Pinned upstream commit: {provenance['commit']}\nPersistent source: {source}", flush=True)
@@ -651,7 +651,7 @@ def main(argv=None):
     elif not args.skip_container and not args.build_only:
         missing = missing_dependencies(CONTAINER_DEPS)
         if missing:
-            run(["sudo", "pacman", "-S", "--needed", *missing])
+            run(["sudo", "pacman", "-S", "--noconfirm", "--needed", *missing])
     if not args.backend_only and package is None:
         binary = build_desktop(source)
         package = package_desktop(source, binary, provenance)

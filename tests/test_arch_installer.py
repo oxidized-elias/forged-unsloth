@@ -321,7 +321,7 @@ def test_resume_finishes_package_without_fetching_building_or_provisioning(tmp_p
         monkeypatch.setattr(arch, name, lambda *a, **kw: pytest.fail('Resume fetched, built or provisioned'))
     data = tmp_path / 'resume-data'
     assert arch.main(['--resume', str(source), '--data-dir', str(data), '--no-overwrite-agents']) == 0
-    assert ['sudo', 'pacman', '-U', package] in commands
+    assert ['sudo', 'pacman', '-U', '--noconfirm', package] in commands
     receipt = json.loads((data / 'installation.json').read_text())
     assert receipt['package'] == str(package) and receipt['agents'] is None
 
@@ -371,3 +371,12 @@ def test_piped_installer_child_reads_confirmation_from_controlling_terminal():
         assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors='replace')
     finally:
         os.close(master)
+
+
+def test_dependency_installation_skips_pacman_confirmation(monkeypatch):
+    commands = []
+    monkeypatch.setattr(arch, 'missing_dependencies', lambda packages: ['git'])
+    monkeypatch.setattr(arch.shutil, 'which', lambda command: '/usr/bin/' + command)
+    monkeypatch.setattr(arch, 'run', lambda arguments, **kw: commands.append(arguments))
+    arch.ensure_dependencies(False)
+    assert commands == [['sudo', 'pacman', '-S', '--noconfirm', '--needed', 'git']]
